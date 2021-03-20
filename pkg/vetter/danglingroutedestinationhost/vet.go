@@ -22,13 +22,14 @@ package danglingroutedestinationhost
 import (
 	"strings"
 
-	v1alpha3 "github.com/aspenmesh/istio-client-go/pkg/apis/networking/v1alpha3"
-	netv1alpha3 "github.com/aspenmesh/istio-client-go/pkg/client/listers/networking/v1alpha3"
+	istioClientNet "istio.io/client-go/pkg/apis/networking/v1beta1"
+	istioNetListers "istio.io/client-go/pkg/listers/networking/v1beta1"
+	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/client-go/listers/core/v1"
+
 	apiv1 "github.com/aspenmesh/istio-vet/api/v1"
 	"github.com/aspenmesh/istio-vet/pkg/vetter"
 	"github.com/aspenmesh/istio-vet/pkg/vetter/util"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/listers/core/v1"
 )
 
 const (
@@ -44,9 +45,8 @@ const (
 // DanglingRouteDestinationHost implements Vetter interface
 type DanglingRouteDestinationHost struct {
 	nsLister  v1.NamespaceLister
-	cmLister  v1.ConfigMapLister
 	svcLister v1.ServiceLister
-	vsLister  netv1alpha3.VirtualServiceLister
+	vsLister  istioNetListers.VirtualServiceLister
 }
 
 func createServiceMap(svcs []*corev1.Service) map[string]bool {
@@ -61,7 +61,7 @@ func createServiceMap(svcs []*corev1.Service) map[string]bool {
 // createDanglingRouteHostNotes creates notes for VirtualService(s) which have
 // dangling route hostname(s).
 func createDanglingRouteHostNotes(svcs []*corev1.Service,
-	vsList []*v1alpha3.VirtualService) []*apiv1.Note {
+	vsList []*istioClientNet.VirtualService) []*apiv1.Note {
 	var err error
 	var host string
 	notes := []*apiv1.Note{}
@@ -108,12 +108,12 @@ func createDanglingRouteHostNotes(svcs []*corev1.Service,
 
 // Vet returns the list of generated notes
 func (r *DanglingRouteDestinationHost) Vet() ([]*apiv1.Note, error) {
-	svcs, err := util.ListServicesInMesh(r.nsLister, r.cmLister, r.svcLister)
+	svcs, err := util.ListServicesInMesh(r.nsLister, r.svcLister)
 	if err != nil {
 		return nil, err
 	}
 
-	vsList, err := util.ListVirtualServicesInMesh(r.nsLister, r.cmLister, r.vsLister)
+	vsList, err := util.ListVirtualServicesInMesh(r.nsLister, r.vsLister)
 	if err != nil {
 		return nil, err
 	}
@@ -131,8 +131,15 @@ func (r *DanglingRouteDestinationHost) Info() *apiv1.Info {
 func NewVetter(factory vetter.ResourceListGetter) *DanglingRouteDestinationHost {
 	return &DanglingRouteDestinationHost{
 		nsLister:  factory.K8s().Core().V1().Namespaces().Lister(),
-		cmLister:  factory.K8s().Core().V1().ConfigMaps().Lister(),
 		svcLister: factory.K8s().Core().V1().Services().Lister(),
-		vsLister:  factory.Istio().Networking().V1alpha3().VirtualServices().Lister(),
+		vsLister:  factory.Istio().Networking().V1beta1().VirtualServices().Lister(),
+	}
+}
+
+func NewVetterFromListers(nsLister v1.NamespaceLister, svcLister v1.ServiceLister, vsLister istioNetListers.VirtualServiceLister) *DanglingRouteDestinationHost {
+	return &DanglingRouteDestinationHost{
+		nsLister:  nsLister,
+		svcLister: svcLister,
+		vsLister:  vsLister,
 	}
 }

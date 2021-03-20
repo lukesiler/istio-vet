@@ -19,39 +19,32 @@ limitations under the License.
 package util
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
-	"text/template"
 
-	v1alpha3 "github.com/aspenmesh/istio-client-go/pkg/apis/networking/v1alpha3"
-	netv1alpha3 "github.com/aspenmesh/istio-client-go/pkg/client/listers/networking/v1alpha3"
-	apiv1 "github.com/aspenmesh/istio-vet/api/v1"
 	"github.com/cnf/structhash"
 	"github.com/ghodss/yaml"
 	"github.com/golang/glog"
-	"github.com/golang/protobuf/ptypes"
-	"github.com/golang/protobuf/ptypes/duration"
 	meshv1alpha1 "istio.io/api/mesh/v1alpha1"
+	istioClientNet "istio.io/client-go/pkg/apis/networking/v1beta1"
+	istioNetListers "istio.io/client-go/pkg/listers/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/listers/core/v1"
+	v1 "k8s.io/client-go/listers/core/v1"
+
+	apiv1 "github.com/aspenmesh/istio-vet/api/v1"
 )
 
 // Constants related to Istio
 const (
 	IstioNamespace                = "istio-system"
 	IstioProxyContainerName       = "istio-proxy"
-	IstioMixerDeploymentName      = "istio-mixer"
-	IstioMixerContainerName       = "mixer"
-	IstioPilotDeploymentName      = "istio-pilot"
-	IstioPilotContainerName       = "discovery"
 	IstioInitContainerName        = "istio-init"
 	IstioConfigMap                = "istio"
 	IstioConfigMapKey             = "mesh"
-	IstioAuthPolicy               = "authPolicy: MUTUAL_TLS"
 	IstioInitializerPodAnnotation = "sidecar.istio.io/status"
 	IstioInitializerConfigMap     = "istio-sidecar-injector"
 	IstioInitializerConfigMapKey  = "config"
@@ -62,35 +55,13 @@ const (
 		IstioInitializerConfigMap + "\" not found"
 	initializerDisabledSummary = "Istio initializer is not configured." +
 		" Enable initializer and automatic sidecar injection to use "
-	kubernetesServiceName = "kubernetes"
+	kubernetesServiceName            = "kubernetes"
+	kubernetesProxyStatusPort        = "--statusPort"
+	kubernetesProxyStatusPortDefault = 15020
 )
 
 var istioInjectNamespaceLabel = map[string]string{
 	"istio-injection": "enabled"}
-
-// Following types are taken from
-// https://github.com/istio/istio/blob/master/pilot/pkg/kube/inject/inject.go
-
-// InjectionPolicy determines the policy for injecting the
-// sidecar proxy into the watched namespace(s).
-type InjectionPolicy string
-
-// SidecarTemplateData is the data object to which the templated
-// version of `SidecarInjectionSpec` is applied.
-type SidecarTemplateData struct {
-	ObjectMeta  *metav1.ObjectMeta
-	Spec        *corev1.PodSpec
-	ProxyConfig *meshv1alpha1.ProxyConfig
-	MeshConfig  *meshv1alpha1.MeshConfig
-}
-
-// SidecarInjectionSpec collects all container types and volumes for
-// sidecar mesh injection
-type SidecarInjectionSpec struct {
-	InitContainers []corev1.Container `yaml:"initContainers"`
-	Containers     []corev1.Container `yaml:"containers"`
-	Volumes        []corev1.Volume    `yaml:"volumes"`
-}
 
 // Config specifies the sidecar injection configuration This includes
 // the sidear template and cluster-side injection policy. It is used
@@ -103,27 +74,21 @@ type IstioInjectConfig struct {
 	Template string `json:"template"`
 }
 
-// End types from
-// https://github.com/istio/istio/blob/master/pilot/pkg/kube/inject/inject.go
-
 var istioSupportedServicePrefix = []string{
 	"http", "http-",
 	"http2", "http2-",
+	"https", "https-",
 	"grpc", "grpc-",
 	"mongo", "mongo-",
 	"redis", "redis-",
-	"tcp", "tcp-"}
+	"tcp", "tcp-",
+	"tls", "tls-",
+	"udp", "udp-"}
 
 var defaultExemptedNamespaces = map[string]bool{
 	"kube-system":  true,
 	"kube-public":  true,
 	"istio-system": true}
-
-// from: https://github.com/istio/istio/blob/release-0.8/pilot/pkg/kube/inject/inject.go
-func isset(m map[string]string, key string) bool {
-	_, ok := m[key]
-	return ok
-}
 
 // DefaultExemptedNamespaces returns list of default Namsepaces which are
 // exempted from automatic sidecar injection.
@@ -142,16 +107,6 @@ func DefaultExemptedNamespaces() []string {
 // sidecar injection.
 func ExemptedNamespace(ns string) bool {
 	return defaultExemptedNamespaces[ns]
-}
-
-// Function formatDuration is taken from
-// https://github.com/istio/istio/blob/master/pilot/pkg/kube/inject/inject.go
-func formatDuration(in *duration.Duration) string {
-	dur, err := ptypes.Duration(in)
-	if err != nil {
-		return "1s"
-	}
-	return dur.String()
 }
 
 // GetInitializerConfig retrieves the Istio Initializer config.
@@ -193,6 +148,7 @@ func GetMeshConfigMap(cmLister v1.ConfigMapLister) (*corev1.ConfigMap, error) {
 	}
 	return cm, nil
 }
+
 func GetMeshConfig(cm *corev1.ConfigMap) (*meshv1alpha1.MeshConfig, error) {
 	c, e := cm.Data[IstioConfigMapKey]
 	if !e {
@@ -205,7 +161,7 @@ func GetMeshConfig(cm *corev1.ConfigMap) (*meshv1alpha1.MeshConfig, error) {
 		return nil, nil
 	}
 	var cfg meshv1alpha1.MeshConfig
-	if err := ApplyYAML(c, &cfg); err != nil {
+	if err := ApplyYAML(c, &cfg, false); err != nil {
 		glog.Errorf("Failed to parse yaml mesh config: %s", err)
 		return nil, err
 	}
@@ -221,36 +177,9 @@ func makeSideCarSpec(icm, mcm *corev1.ConfigMap) (*SidecarInjectionSpec, error) 
 	if err != nil {
 		return nil, err
 	}
-
-	// Following is taken from injectionData function in
-	// https://github.com/istio/istio/blob/master/pilot/pkg/kube/inject/inject.go
-	data := SidecarTemplateData{
-		ObjectMeta:  &metav1.ObjectMeta{},
-		Spec:        &corev1.PodSpec{},
-		ProxyConfig: mc.DefaultConfig,
-		MeshConfig:  mc,
-	}
-
-	funcMap := template.FuncMap{
-		"formatDuration": formatDuration,
-		"isset":          isset,
-	}
-
-	var tmpl bytes.Buffer
-	temp := template.New("inject").Delims("[[", "]]")
-	t := template.Must(temp.Funcs(funcMap).Parse(ic.Template))
-	if err := t.Execute(&tmpl, &data); err != nil {
-		return nil, err
-	}
-
-	var sic SidecarInjectionSpec
-	if err := yaml.Unmarshal(tmpl.Bytes(), &sic); err != nil {
-		return nil, err
-	}
-	// End snippet from injectionData function in
-	// https://github.com/istio/istio/blob/master/pilot/pkg/kube/inject/inject.go
-
-	return &sic, nil
+	version := "latest"
+	spec, _, err := injectionData(ic.Template, version, &metav1.ObjectMeta{}, &corev1.PodSpec{}, &metav1.ObjectMeta{}, mc.DefaultConfig, mc)
+	return spec, err
 }
 
 // GetInitializerSidecarSpec retrieves the sidecar spec which will be inserted
@@ -332,19 +261,10 @@ func InitImage(n string, s corev1.PodSpec) (string, error) {
 	return imageFromContainers(n, s.InitContainers)
 }
 
-func existsInStringSlice(e string, list []string) bool {
-	for i := range list {
-		if e == list[i] {
-			return true
-		}
-	}
-	return false
-}
-
 // ListNamespacesInMesh returns the list of Namespaces in the mesh.
 // Namespaces with label "istio-inject=enabled" are considered in
 // the mesh.
-func ListNamespacesInMesh(nsLister v1.NamespaceLister, cmLister v1.ConfigMapLister) ([]*corev1.Namespace, error) {
+func ListNamespacesInMesh(nsLister v1.NamespaceLister) ([]*corev1.Namespace, error) {
 	ns, err := nsLister.List(labels.Set(istioInjectNamespaceLabel).AsSelector())
 	if err != nil {
 		glog.Error("Failed to retrieve namespaces: ", err)
@@ -356,9 +276,9 @@ func ListNamespacesInMesh(nsLister v1.NamespaceLister, cmLister v1.ConfigMapList
 // ListPodsInMesh returns the list of Pods in the mesh.
 // Pods in Namespaces returned by ListNamespacesInMesh with sidecar
 // injected as determined by SidecarInjected are considered in the mesh.
-func ListPodsInMesh(nsLister v1.NamespaceLister, cmLister v1.ConfigMapLister, podLister v1.PodLister) ([]*corev1.Pod, error) {
+func ListPodsInMesh(nsLister v1.NamespaceLister, podLister v1.PodLister) ([]*corev1.Pod, error) {
 	pods := []*corev1.Pod{}
-	ns, err := ListNamespacesInMesh(nsLister, cmLister)
+	ns, err := ListNamespacesInMesh(nsLister)
 	if err != nil {
 		return nil, err
 	}
@@ -379,9 +299,9 @@ func ListPodsInMesh(nsLister v1.NamespaceLister, cmLister v1.ConfigMapLister, po
 
 // ListServicesInMesh returns the list of Services in the mesh.
 // Services in Namespaces returned by ListNamespacesInMesh are considered in the mesh.
-func ListServicesInMesh(nsLister v1.NamespaceLister, cmLister v1.ConfigMapLister, svcLister v1.ServiceLister) ([]*corev1.Service, error) {
+func ListServicesInMesh(nsLister v1.NamespaceLister, svcLister v1.ServiceLister) ([]*corev1.Service, error) {
 	services := []*corev1.Service{}
-	ns, err := ListNamespacesInMesh(nsLister, cmLister)
+	ns, err := ListNamespacesInMesh(nsLister)
 	if err != nil {
 		return nil, err
 	}
@@ -420,9 +340,9 @@ func IsEndpointInMesh(ea *corev1.EndpointAddress, podLister v1.PodLister) bool {
 
 // ListEndpointsInMesh returns the list of Endpoints in the mesh.
 // Endpoints in Namespaces returned by ListNamespacesInMesh are considered in the mesh.
-func ListEndpointsInMesh(nsLister v1.NamespaceLister, cmLister v1.ConfigMapLister, epLister v1.EndpointsLister) ([]*corev1.Endpoints, error) {
+func ListEndpointsInMesh(nsLister v1.NamespaceLister, epLister v1.EndpointsLister) ([]*corev1.Endpoints, error) {
 	endpoints := []*corev1.Endpoints{}
-	ns, err := ListNamespacesInMesh(nsLister, cmLister)
+	ns, err := ListNamespacesInMesh(nsLister)
 	if err != nil {
 		return nil, err
 	}
@@ -448,10 +368,10 @@ func ComputeID(n *apiv1.Note) string {
 }
 
 // ListVirtualServices returns a list of VirtualService resources in the mesh.
-func ListVirtualServicesInMesh(nsLister v1.NamespaceLister, cmLister v1.ConfigMapLister,
-	vsLister netv1alpha3.VirtualServiceLister) ([]*v1alpha3.VirtualService, error) {
-	virtualServices := []*v1alpha3.VirtualService{}
-	ns, err := ListNamespacesInMesh(nsLister, cmLister)
+func ListVirtualServicesInMesh(nsLister v1.NamespaceLister,
+	vsLister istioNetListers.VirtualServiceLister) ([]*istioClientNet.VirtualService, error) {
+	virtualServices := []*istioClientNet.VirtualService{}
+	ns, err := ListNamespacesInMesh(nsLister)
 	if err != nil {
 		return nil, err
 	}
@@ -480,4 +400,23 @@ func ConvertHostnameToFQDN(hostname string, namespace string) (string, error) {
 	}
 	// need to return Fully Qualified Domain Name
 	return hostname + "." + namespace + KubernetesDomainSuffix, nil
+}
+
+// ProxyStatusPort extracts status port from the cmd arguments for a given container,
+// as per Istio 1.1 doc, global.proxy.statusPort https://istio.io/docs/reference/config/installation-options-changes/
+func ProxyStatusPort(container corev1.Container) (uint32, error) {
+	var statusPort uint32 = kubernetesProxyStatusPortDefault
+	args := container.Args
+	for index, key := range args {
+		// Key we are looking for - hopefully followed by an argument specifying its value. If not, return default
+		if key == kubernetesProxyStatusPort && index < len(args)-1 {
+			// Next entry should be the port...
+			overridePort, err := strconv.ParseUint(args[index+1], 10, 32)
+			if err != nil {
+				return statusPort, err
+			}
+			return uint32(overridePort), nil
+		}
+	}
+	return statusPort, errors.New("cannot find proxy status port.")
 }

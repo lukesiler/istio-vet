@@ -20,7 +20,13 @@ import (
 	"fmt"
 	"strings"
 
-	istioinformer "github.com/aspenmesh/istio-client-go/pkg/client/informers/externalversions"
+	"github.com/golang/glog"
+	"github.com/spf13/cobra"
+	istioinformer "istio.io/client-go/pkg/informers/externalversions"
+	"k8s.io/client-go/informers"
+	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
+	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
+
 	"github.com/aspenmesh/istio-vet/pkg/istioclient"
 	"github.com/aspenmesh/istio-vet/pkg/meshclient"
 	"github.com/aspenmesh/istio-vet/pkg/vetter"
@@ -28,14 +34,9 @@ import (
 	"github.com/aspenmesh/istio-vet/pkg/vetter/conflictingvirtualservicehost"
 	"github.com/aspenmesh/istio-vet/pkg/vetter/danglingroutedestinationhost"
 	"github.com/aspenmesh/istio-vet/pkg/vetter/meshversion"
-	"github.com/aspenmesh/istio-vet/pkg/vetter/mtlsprobes"
 	"github.com/aspenmesh/istio-vet/pkg/vetter/podsinmesh"
 	"github.com/aspenmesh/istio-vet/pkg/vetter/serviceassociation"
 	"github.com/aspenmesh/istio-vet/pkg/vetter/serviceportprefix"
-	"github.com/golang/glog"
-	"github.com/spf13/cobra"
-	"k8s.io/client-go/informers"
-	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 )
 
 func printNote(level, summary, msg string) {
@@ -88,7 +89,6 @@ func vet(cmd *cobra.Command, args []string) error {
 	vList := []vetter.Vetter{
 		vetter.Vetter(podsinmesh.NewVetter(informerFactory)),
 		vetter.Vetter(meshversion.NewVetter(informerFactory)),
-		vetter.Vetter(mtlsprobes.NewVetter(informerFactory)),
 		vetter.Vetter(applabel.NewVetter(informerFactory)),
 		vetter.Vetter(serviceportprefix.NewVetter(informerFactory)),
 		vetter.Vetter(serviceassociation.NewVetter(informerFactory)),
